@@ -73,7 +73,11 @@ namespace BrokerCalculator
                     Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bonds.json"),
                     Path.Combine(Directory.GetCurrentDirectory(), "bonds.json"),
                     "bonds.json",
-                    Path.Combine("..", "..", "..", "bonds.json")
+                    Path.Combine("..", "..", "..", "bonds.json"),
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bond.json"),
+                    Path.Combine(Directory.GetCurrentDirectory(), "bond.json"),
+                    "bond.json",
+                    Path.Combine("..", "..", "..", "bond.json")
                 };
                 string foundPath = possiblePaths.FirstOrDefault(File.Exists);
                 if (foundPath != null)
@@ -103,31 +107,114 @@ namespace BrokerCalculator
                 if (BondFetchStatus != null) BondFetchStatus.Text = "Enter bond number e.g. 698";
                 return;
             }
-            var bond = _allBonds.FirstOrDefault(b => b.bondNumber.Trim() == num || b.bondNumber.Trim().TrimStart('0') == num.TrimStart('0'));
-            if (bond == null)
+
+            DateTime settlement = SettlementDatePicker?.SelectedDate ?? DateTime.Today;
+            var matches = _allBonds
+                .Where(b =>
+                    b.bondNumber.Trim() == num ||
+                    b.bondNumber.Trim().TrimStart('0') == num.TrimStart('0'))
+                .OrderBy(b => Math.Abs((ParseBondDate(b.auctionDate) - settlement).TotalDays))
+                .ToList();
+
+            if (matches.Count == 0)
             {
                 if (BondFetchStatus != null) BondFetchStatus.Text = $"Bond {num} not found offline";
                 return;
             }
-            _currentBond = bond;
-            if (CouponRateText != null) CouponRateText.Text = $"{bond.couponRate}%";
-            if (MaturityDateText != null) MaturityDateText.Text = ParseBondDate(bond.maturityDate).ToString("yyyy-MM-dd");
-            if (AuctionDateText != null) AuctionDateText.Text = ParseBondDate(bond.auctionDate).ToString("yyyy-MM-dd");
-            if (BondFetchStatus != null) BondFetchStatus.Text = $"✓ Found (Coupon dates {bond.couponDate1} & {bond.couponDate2})";
+
+            _currentBond = matches.First();
+            if (CouponRateText != null) CouponRateText.Text = $"{_currentBond.couponRate}%";
+            if (MaturityDateText != null) MaturityDateText.Text = ParseBondDate(_currentBond.maturityDate).ToString("yyyy-MM-dd");
+            if (AuctionDateText != null) AuctionDateText.Text = ParseBondDate(_currentBond.auctionDate).ToString("yyyy-MM-dd");
+            if (BondFetchStatus != null)
+            {
+                BondFetchStatus.Text = $"✓ Found bond {_currentBond.bondNumber} (auction {ParseBondDate(_currentBond.auctionDate).ToString("yyyy-MM-dd")})";
+            }
+
             try
             {
-                if (!string.IsNullOrEmpty(bond.lastCouponDisplay) && ValLastCouponText != null) ValLastCouponText.Text = bond.lastCouponDisplay;
-                if (!string.IsNullOrEmpty(bond.nextCouponDisplay) && ValNextCouponText != null) ValNextCouponText.Text = bond.nextCouponDisplay;
+                if (!string.IsNullOrEmpty(_currentBond.lastCouponDisplay) && ValLastCouponText != null) ValLastCouponText.Text = _currentBond.lastCouponDisplay;
+                if (!string.IsNullOrEmpty(_currentBond.nextCouponDisplay) && ValNextCouponText != null) ValNextCouponText.Text = _currentBond.nextCouponDisplay;
             }
             catch { }
-            if (BondYieldBox != null && string.IsNullOrWhiteSpace(BondYieldBox.Text)) BondYieldBox.Text = bond.couponRate.ToString();
+
+            if (BondYieldBox != null && string.IsNullOrWhiteSpace(BondYieldBox.Text)) BondYieldBox.Text = _currentBond.couponRate.ToString();
         }
 
         private DateTime ParseBondDate(string s)
         {
+            if (string.IsNullOrWhiteSpace(s)) return DateTime.Today;
             if (DateTime.TryParse(s, out var dt)) return dt;
-            if (DateTime.TryParseExact(s.Substring(0, 10), "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out dt)) return dt;
+            if (s.Length >= 10 && DateTime.TryParseExact(s.Substring(0, 10), "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out dt)) return dt;
             return DateTime.Today;
+        }
+
+        private DateTime BuildCouponDate(int year, string monthDay)
+        {
+            if (string.IsNullOrWhiteSpace(monthDay)) return default;
+            var parts = monthDay.Split('-');
+            if (parts.Length < 2) return default;
+            if (!int.TryParse(parts[0], out int month) || !int.TryParse(parts[1], out int day)) return default;
+            if (month < 1 || month > 12) return default;
+            int safeDay = Math.Min(day, DateTime.DaysInMonth(year, month));
+            return new DateTime(year, month, safeDay);
+        }
+
+        private (DateTime lastCoupon, DateTime nextCoupon, List<DateTime> futureCoupons)
+            GetCouponSchedule(BondInfo bond, DateTime settlement)
+        {
+            var maturity = ParseBondDate(bond.maturityDate);
+            var issueDate = ParseBondDate(bond.auctionDate);
+            var monthDays = new List<string>();
+            if (!string.IsNullOrWhiteSpace(bond.couponDate1)) monthDays.Add(bond.couponDate1);
+            if (!string.IsNullOrWhiteSpace(bond.couponDate2)) monthDays.Add(bond.couponDate2);
+
+            var candidates = new SortedSet<DateTime>();
+            if (monthDays.Count > 0)
+            {
+                for (int year = issueDate.Year - 1; year <= maturity.Year + 1; year++)
+                {
+                    foreach (var monthDay in monthDays.Distinct())
+                    {
+                        var candidate = BuildCouponDate(year, monthDay);
+                        if (candidate != default && candidate >= issueDate.AddYears(-1) && candidate <= maturity.AddYears(2))
+                            candidates.Add(candidate);
+                    }
+                }
+            }
+
+            if (candidates.Count == 0)
+            {
+                int matDay = maturity.Day;
+                int matMonth = maturity.Month;
+                int otherMonth = matMonth - 6;
+                if (otherMonth <= 0) otherMonth += 12;
+                List<DateTime> all = new List<DateTime>();
+                for (int y = settlement.Year - 1; y <= maturity.Year; y++)
+                {
+                    try { int d = Math.Min(matDay, DateTime.DaysInMonth(y, matMonth)); all.Add(new DateTime(y, matMonth, d)); } catch { }
+                    try { int d = Math.Min(matDay, DateTime.DaysInMonth(y, otherMonth)); all.Add(new DateTime(y, otherMonth, d)); } catch { }
+                }
+                all = all.Distinct().OrderBy(d => d).ToList();
+                DateTime last = all.Where(d => d <= settlement).OrderByDescending(d => d).FirstOrDefault();
+                if (last == default) last = all.FirstOrDefault();
+                DateTime next = all.Where(d => d > settlement).OrderBy(d => d).FirstOrDefault();
+                if (next == default) next = maturity;
+                List<DateTime> future = all.Where(d => d >= next && d <= maturity).OrderBy(d => d).ToList();
+                if (!future.Contains(maturity)) future.Add(maturity);
+                future = future.Distinct().OrderBy(d => d).ToList();
+                return (last, next, future);
+            }
+
+            var ordered = candidates.Where(d => d <= maturity.AddDays(1)).OrderBy(d => d).ToList();
+            DateTime last = ordered.Where(d => d <= settlement).OrderByDescending(d => d).FirstOrDefault();
+            if (last == default) last = ordered.FirstOrDefault();
+            DateTime next = ordered.Where(d => d > settlement).OrderBy(d => d).FirstOrDefault();
+            if (next == default) next = maturity;
+            var future = ordered.Where(d => d >= next && d <= maturity).OrderBy(d => d).ToList();
+            if (future.Count == 0) future.Add(maturity);
+            future = future.Distinct().OrderBy(d => d).ToList();
+            return (last, next, future);
         }
 
         private void CalculatePrice_Click(object sender, RoutedEventArgs e)
@@ -177,20 +264,20 @@ namespace BrokerCalculator
             CalculateBondValuation(BondInfo bond, double yieldPercent, double faceValue, DateTime settlement, DateTime maturity)
         {
             double couponRate = bond.couponRate;
-            double couponSemi = couponRate / 2.0;  // semi-annual coupon in %
+            double couponSemi = couponRate / 2.0;
             double ySemi = yieldPercent / 2.0 / 100.0;
-            var schedule = GetCouponSchedule(settlement, maturity);
+            var schedule = GetCouponSchedule(bond, settlement);
             DateTime lastCoupon = schedule.lastCoupon;
             DateTime nextCoupon = schedule.nextCoupon;
             List<DateTime> futureCoupons = schedule.futureCoupons;
+
             int daysSinceLast = (settlement - lastCoupon).Days;
             int daysInPeriod = (nextCoupon - lastCoupon).Days;
             int daysToNext = (nextCoupon - settlement).Days;
 
             if (daysInPeriod <= 0) daysInPeriod = 182;
+            if (daysToNext < 0) daysToNext = 0;
 
-            // Correct for Tanzanian government bond pricing:
-            // accrued interest is calculated from the current coupon period, not a 365-day annual base.
             double accrued = couponSemi * (double)daysSinceLast / (double)daysInPeriod;
             double w = (double)daysToNext / (double)daysInPeriod;
             double dirty = 0.0;
@@ -206,29 +293,6 @@ namespace BrokerCalculator
             double clean = dirty - accrued;
             double cost = dirty * faceValue / 100.0;
             return (clean, dirty, accrued, cost, lastCoupon, nextCoupon, futureCoupons);
-        }
-
-        private (DateTime lastCoupon, DateTime nextCoupon, List<DateTime> futureCoupons) GetCouponSchedule(DateTime settlement, DateTime maturity)
-        {
-            int matDay = maturity.Day;
-            int matMonth = maturity.Month;
-            int otherMonth = matMonth - 6;
-            if (otherMonth <= 0) otherMonth += 12;
-            List<DateTime> all = new List<DateTime>();
-            for (int y = settlement.Year - 1; y <= maturity.Year; y++)
-            {
-                try { int d = Math.Min(matDay, DateTime.DaysInMonth(y, matMonth)); all.Add(new DateTime(y, matMonth, d)); } catch { }
-                try { int d = Math.Min(matDay, DateTime.DaysInMonth(y, otherMonth)); all.Add(new DateTime(y, otherMonth, d)); } catch { }
-            }
-            all = all.Distinct().OrderBy(d => d).ToList();
-            DateTime last = all.Where(d => d <= settlement).OrderByDescending(d => d).FirstOrDefault();
-            if (last == default) last = all.FirstOrDefault();
-            DateTime next = all.Where(d => d > settlement).OrderBy(d => d).FirstOrDefault();
-            if (next == default) next = maturity;
-            List<DateTime> future = all.Where(d => d >= next && d <= maturity).OrderBy(d => d).ToList();
-            if (!future.Contains(maturity)) future.Add(maturity);
-            future = future.Distinct().OrderBy(d => d).ToList();
-            return (last, next, future);
         }
 
         private void SettlementDatePicker_SelectedDateChanged(object sender, SelectionChangedEventArgs e) { }
