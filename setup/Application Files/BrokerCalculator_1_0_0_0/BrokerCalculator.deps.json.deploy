@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "BrokerCalculator/1.0.0": {
+        "runtime": {
+          "BrokerCalculator.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "BrokerCalculator/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
